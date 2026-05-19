@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import datetime as dt
+import errno
 import inspect
 import typing
 from collections.abc import Mapping, Sequence
@@ -51,7 +52,9 @@ def from_timestamp(value: typing.Any) -> dt.datetime:
     except OverflowError as exc:
         raise ValueError("Timestamp is too large") from exc
     except OSError as exc:
-        raise ValueError("Error converting value to datetime") from exc
+        if exc.errno == errno.EINVAL:
+            raise ValueError("Timestamp is out of range") from exc
+        raise
 
 
 def from_timestamp_ms(value: typing.Any) -> dt.datetime:
@@ -75,10 +78,8 @@ def timestamp_ms(value: dt.datetime) -> float:
 
 
 def ensure_text_type(val: str | bytes) -> str:
-    try:
-        val = val.decode("utf-8")
-    except AttributeError:
-        pass
+    if isinstance(val, bytes):
+        return val.decode("utf-8")
     return str(val)
 
 
@@ -121,10 +122,12 @@ def _get_value_for_keys(obj, keys, default):
 
 
 def _get_value_for_key(obj, key, default):
-    try:
-        return obj[key]
-    except (KeyError, IndexError, TypeError, AttributeError):
-        return getattr(obj, key, default)
+    if hasattr(obj, "__getitem__"):
+        try:
+            return obj[key]
+        except (KeyError, IndexError, AttributeError):
+            return getattr(obj, key, default)
+    return getattr(obj, key, default)
 
 
 def set_value(dct: dict[str, typing.Any], key: str, value: typing.Any):

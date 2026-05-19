@@ -1027,6 +1027,9 @@ class Integer(Number[int]):
         self.strict = strict
         super().__init__(as_string=as_string, **kwargs)
 
+    def _format_num(self, value) -> int:
+        return int(value)
+
     # override Number
     def _validated(self, value: typing.Any) -> int:
         if self.strict and not isinstance(value, numbers.Integral):
@@ -1059,6 +1062,9 @@ class Float(Number[float]):
     ):
         self.allow_nan = allow_nan
         super().__init__(as_string=as_string, **kwargs)
+
+    def _format_num(self, value) -> float:
+        return float(value)
 
     def _validated(self, value: typing.Any) -> float:
         num = super()._validated(value)
@@ -1269,6 +1275,7 @@ class _TemporalField(Field[_D], metaclass=abc.ABCMeta):
         # or ``_deserialize`` methods. This allows a Schema to dynamically set the
         # format, e.g. from a Meta option
         self.format = format
+        self._format_func = None
 
     def _bind_to_schema(self, field_name, parent):
         super()._bind_to_schema(field_name, parent)
@@ -1277,16 +1284,14 @@ class _TemporalField(Field[_D], metaclass=abc.ABCMeta):
             or getattr(self.root.opts, self.SCHEMA_OPTS_VAR_NAME)
             or self.DEFAULT_FORMAT
         )
+        self._format_func = self.SERIALIZATION_FUNCS.get(self.format)
 
     def _serialize(self, value: _D | None, attr, obj, **kwargs) -> str | float | None:
         if value is None:
             return None
-        data_format = self.format or self.DEFAULT_FORMAT
-        funcs = {**self.SERIALIZATION_FUNCS}
-        format_func = funcs.get(data_format)
-        if format_func:
-            return format_func(value)
-        return value.strftime(data_format)
+        if self._format_func is not None:
+            return self._format_func(value)
+        return value.strftime(self.format or self.DEFAULT_FORMAT)
 
     def _deserialize(self, value, attr, data, **kwargs) -> _D:
         internal_type: type[_D] = getattr(dt, self.OBJ_TYPE)
@@ -1298,7 +1303,7 @@ class _TemporalField(Field[_D], metaclass=abc.ABCMeta):
             if func:
                 return func(value)
             return self._make_object_from_format(value, data_format)
-        except (TypeError, AttributeError, ValueError) as error:
+        except (TypeError, AttributeError, ValueError, OSError) as error:
             raise self.make_error(
                 "invalid", input=value, obj_type=self.OBJ_TYPE
             ) from error
@@ -2042,9 +2047,9 @@ class Method(Field):
         super()._bind_to_schema(field_name, parent)
 
     def _serialize(self, value, attr, obj, **kwargs):
-        if self.serialize_method_name is not None:
-            method = getattr(self.parent, self.serialize_method_name)
-            return method(obj)
+        # _serialize_method is resolved once in _bind_to_schema; use it directly
+        if self._serialize_method is not None:
+            return self._serialize_method(obj)
         return missing_
 
     def _deserialize(self, value, attr, data, **kwargs):

@@ -6,7 +6,7 @@ from marshmallow import EXCLUDE, Schema, fields
 class UserSchema(Schema):
     name = fields.String(allow_none=True)
     email = fields.Email(allow_none=True)
-    age = fields.Integer()
+    age = fields.Float()
     created = fields.DateTime()
     id = fields.Integer(allow_none=True)
     homepage = fields.Url()

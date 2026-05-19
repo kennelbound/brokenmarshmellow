@@ -538,7 +538,7 @@ class Schema(metaclass=SchemaMeta):
             return [self._serialize(d, many=False) for d in obj]
         ret = self.dict_class()
         dump_fields = self.dump_fields
-        data_keys = {name: f.data_key for name, f in dump_fields.items()}
+        data_keys = self._data_keys
         for attr_name, field_obj in dump_fields.items():
             value = field_obj.serialize(attr_name, obj, accessor=self.get_attribute)
             if value is missing:
@@ -1054,6 +1054,7 @@ class Schema(metaclass=SchemaMeta):
         self.fields = fields_dict
         self.dump_fields = dump_fields
         self.load_fields = load_fields
+        self._data_keys = {name: f.data_key for name, f in dump_fields.items()}
 
     def on_bind_field(self, field_name: str, field_obj: Field) -> None:
         """Hook to modify a field when it is bound to the `Schema <marshmallow.Schema>`.
