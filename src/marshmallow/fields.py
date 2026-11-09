@@ -4,6 +4,7 @@ from __future__ import annotations
 import abc
 import collections
 import copy
+import functools
 import datetime as dt
 import decimal
 import email.utils
@@ -241,6 +242,8 @@ class Field(typing.Generic[_InternalT]):
         self.parent: Field | Schema | None = None
         self.name: str | None = None
         self.root: Schema | None = None
+        self._attr_key: str | None = self.attribute  # resolved to field_name in _bind_to_schema
+        self._attr_key_parts: list[str] | None = None  # set in _bind_to_schema for dotted keys
 
     def __repr__(self) -> str:
         return (
@@ -271,9 +274,12 @@ class Field(typing.Generic[_InternalT]):
         :param accessor: A callable used to retrieve the value of `attr` from
             the object `obj`. Defaults to `marshmallow.utils.get_value`.
         """
-        accessor_func = accessor or utils.get_value
-        check_key = attr if self.attribute is None else self.attribute
-        return accessor_func(obj, check_key, default)
+        if accessor is None:
+            key = self._attr_key if self._attr_key is not None else attr
+            if self._attr_key_parts is not None:
+                return utils._get_value_for_keys(obj, self._attr_key_parts, default)
+            return utils._get_value_for_key(obj, key, default)
+        return accessor(obj, self._attr_key if self._attr_key is not None else attr, default)
 
     def _validate(self, value: typing.Any) -> None:
         """Perform validation on ``value``. Raise a :exc:`ValidationError` if validation
@@ -281,7 +287,7 @@ class Field(typing.Generic[_InternalT]):
         """
         self._validate_all(value)
 
-    @property
+    @functools.cached_property
     def _validate_all(self) -> typing.Callable[[typing.Any], None]:
         return And(*self.validators)
 
@@ -412,6 +418,8 @@ class Field(typing.Generic[_InternalT]):
         self.root = self.root or (
             self.parent.root if isinstance(self.parent, Field) else self.parent
         )
+        self._attr_key = self.attribute if self.attribute is not None else field_name
+        self._attr_key_parts = self._attr_key.split(".") if "." in self._attr_key else None
 
     def _serialize(
         self, value: _InternalT | None, attr: str | None, obj: typing.Any, **kwargs
@@ -561,6 +569,8 @@ class Nested(Field):
         self.many = many
         self.unknown = unknown
         self._schema: Schema | None = None  # Cached Schema instance
+        self._cached_nested_dump: typing.Callable | None = None
+        self._cached_nested_many: bool = False
         super().__init__(**kwargs)
 
     @property
@@ -623,11 +633,13 @@ class Nested(Field):
     def _serialize(self, nested_obj, attr, obj, **kwargs):
         # Load up the schema first. This allows a RegistryError to be raised
         # if an invalid schema name was passed
-        schema = self.schema
+        if self._cached_nested_dump is None:
+            schema = self.schema
+            self._cached_nested_dump = schema.dump
+            self._cached_nested_many = schema.many or self.many
         if nested_obj is None:
             return None
-        many = schema.many or self.many
-        return schema.dump(nested_obj, many=many)
+        return self._cached_nested_dump(nested_obj, many=self._cached_nested_many)
 
     def _test_collection(self, value: typing.Any) -> None:
         many = self.schema.many or self.many
@@ -906,7 +918,11 @@ class String(Field[str]):
     def _serialize(self, value, attr, obj, **kwargs) -> str | None:
         if value is None:
             return None
-        return utils.ensure_text_type(value)
+        if isinstance(value, str):
+            return value
+        if isinstance(value, bytes):
+            return value.decode("utf-8")
+        return str(value)
 
     def _deserialize(self, value, attr, data, **kwargs) -> str:
         if not isinstance(value, (str, bytes)):
@@ -1028,6 +1044,8 @@ class Integer(Number[int]):
         super().__init__(as_string=as_string, **kwargs)
 
     def _format_num(self, value) -> int:
+        if type(value) is int:
+            return value
         return int(value)
 
     # override Number
@@ -1064,6 +1082,8 @@ class Float(Number[float]):
         super().__init__(as_string=as_string, **kwargs)
 
     def _format_num(self, value) -> float:
+        if type(value) is float:
+            return value
         return float(value)
 
     def _validated(self, value: typing.Any) -> float:
@@ -1291,7 +1311,11 @@ class _TemporalField(Field[_D], metaclass=abc.ABCMeta):
             return None
         if self._format_func is not None:
             return self._format_func(value)
-        return value.strftime(self.format or self.DEFAULT_FORMAT)
+        data_format = self.format or self.DEFAULT_FORMAT
+        format_func = self.SERIALIZATION_FUNCS.get(data_format)
+        if format_func is not None:
+            return format_func(value)
+        return value.strftime(data_format)
 
     def _deserialize(self, value, attr, data, **kwargs) -> _D:
         internal_type: type[_D] = getattr(dt, self.OBJ_TYPE)

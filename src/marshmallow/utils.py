@@ -78,6 +78,8 @@ def timestamp_ms(value: dt.datetime) -> float:
 
 
 def ensure_text_type(val: str | bytes) -> str:
+    if isinstance(val, str):
+        return val
     if isinstance(val, bytes):
         return val.decode("utf-8")
     return str(val)
@@ -121,11 +123,19 @@ def _get_value_for_keys(obj, keys, default):
     )
 
 
+_type_has_getitem: dict[type, bool] = {}
+
+
 def _get_value_for_key(obj, key, default):
-    if hasattr(obj, "__getitem__"):
+    obj_type = type(obj)
+    has_getitem = _type_has_getitem.get(obj_type)
+    if has_getitem is None:
+        has_getitem = hasattr(obj_type, "__getitem__")
+        _type_has_getitem[obj_type] = has_getitem
+    if has_getitem:
         try:
             return obj[key]
-        except (KeyError, IndexError, AttributeError):
+        except (KeyError, IndexError, TypeError, AttributeError):
             return getattr(obj, key, default)
     return getattr(obj, key, default)
 

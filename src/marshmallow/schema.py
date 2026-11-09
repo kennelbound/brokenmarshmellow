@@ -440,6 +440,18 @@ class Schema(metaclass=SchemaMeta):
         self.load_fields: dict[str, Field] = {}
         self.dump_fields: dict[str, Field] = {}
         self._init_fields()
+        self._resolved_hooks: dict[str, list[tuple[typing.Callable, bool, bool]]] = {
+            tag: [
+                (getattr(self, attr_name), hook_many, processor_kwargs.get("pass_original", False))
+                for attr_name, hook_many, processor_kwargs in hooks
+            ]
+            for tag, hooks in self._hooks.items()
+        }
+        self._has_pre_dump = bool(self._hooks[PRE_DUMP])
+        self._has_post_dump = bool(self._hooks[POST_DUMP])
+        self._has_pre_load = bool(self._hooks[PRE_LOAD])
+        self._has_post_load = bool(self._hooks[POST_LOAD])
+        self._has_validates_schema = bool(self._hooks[VALIDATES_SCHEMA])
         messages = {}
         messages.update(self._default_error_messages)
         for cls in reversed(self.__class__.__mro__):
@@ -537,14 +549,12 @@ class Schema(metaclass=SchemaMeta):
         if many and obj is not None:
             return [self._serialize(d, many=False) for d in obj]
         ret = self.dict_class()
-        dump_fields = self.dump_fields
-        data_keys = self._data_keys
-        for attr_name, field_obj in dump_fields.items():
-            value = field_obj.serialize(attr_name, obj, accessor=self.get_attribute)
+        get_attribute = self.get_attribute
+        for output_key, field_obj, attr_name in self._dump_field_items:
+            value = field_obj.serialize(attr_name, obj, accessor=get_attribute)
             if value is missing:
                 continue
-            key = data_keys[attr_name] if data_keys[attr_name] is not None else attr_name
-            ret[key] = value
+            ret[output_key] = value
         return ret
 
     def dump(self, obj: typing.Any, *, many: bool | None = None):
@@ -564,7 +574,7 @@ class Schema(metaclass=SchemaMeta):
             Validation no longer occurs upon serialization.
         """
         many = self.many if many is None else bool(many)
-        if self._hooks[PRE_DUMP]:
+        if self._has_pre_dump:
             processed_obj = self._invoke_dump_processors(
                 PRE_DUMP, obj, many=many, original_data=obj
             )
@@ -573,7 +583,7 @@ class Schema(metaclass=SchemaMeta):
 
         result = self._serialize(processed_obj, many=many)
 
-        if self._hooks[POST_DUMP]:
+        if self._has_post_dump:
             result = self._invoke_dump_processors(
                 POST_DUMP, result, many=many, original_data=obj
             )
@@ -874,7 +884,7 @@ class Schema(metaclass=SchemaMeta):
         if partial is None:
             partial = self.partial
         # Run preprocessors
-        if self._hooks[PRE_LOAD]:
+        if self._has_pre_load:
             try:
                 processed_data = self._invoke_load_processors(
                     PRE_LOAD,
@@ -903,7 +913,7 @@ class Schema(metaclass=SchemaMeta):
                 error_store=error_store, data=result, many=many
             )
             # Run schema-level validation
-            if self._hooks[VALIDATES_SCHEMA]:
+            if self._has_validates_schema:
                 field_errors = bool(error_store.errors)
                 self._invoke_schema_validators(
                     error_store=error_store,
@@ -927,7 +937,7 @@ class Schema(metaclass=SchemaMeta):
                 )
             errors = error_store.errors
             # Run post processors
-            if not errors and postprocess and self._hooks[POST_LOAD]:
+            if not errors and postprocess and self._has_post_load:
                 try:
                     result = self._invoke_load_processors(
                         POST_LOAD,
@@ -1055,6 +1065,12 @@ class Schema(metaclass=SchemaMeta):
         self.dump_fields = dump_fields
         self.load_fields = load_fields
         self._data_keys = {name: f.data_key for name, f in dump_fields.items()}
+        # Pre-resolved (output_key, field, attr_name) tuples used by _serialize.
+        # Recomputed only by _init_fields; do not mutate dump_fields externally.
+        self._dump_field_items = [
+            (f.data_key if f.data_key is not None else name, f, name)
+            for name, f in dump_fields.items()
+        ]
 
     def on_bind_field(self, field_name: str, field_obj: Field) -> None:
         """Hook to modify a field when it is bound to the `Schema <marshmallow.Schema>`.
@@ -1232,25 +1248,23 @@ class Schema(metaclass=SchemaMeta):
         original_data=None,
         **kwargs,
     ):
-        for attr_name, hook_many, processor_kwargs in self._hooks[tag]:
+        call_kwargs = {"many": many, **kwargs}
+        for processor, hook_many, pass_original in self._resolved_hooks[tag]:
             if hook_many != pass_collection:
                 continue
-            # This will be a bound method.
-            processor = getattr(self, attr_name)
-            pass_original = processor_kwargs.get("pass_original", False)
 
             if many and not pass_collection:
                 if pass_original:
                     data = [
-                        processor(item, original, many=many, **kwargs)
+                        processor(item, original, **call_kwargs)
                         for item, original in zip_longest(data, original_data)
                     ]
                 else:
-                    data = [processor(item, many=many, **kwargs) for item in data]
+                    data = [processor(item, **call_kwargs) for item in data]
             elif pass_original:
-                data = processor(data, original_data, many=many, **kwargs)
+                data = processor(data, original_data, **call_kwargs)
             else:
-                data = processor(data, many=many, **kwargs)
+                data = processor(data, **call_kwargs)
         return data
 
 
